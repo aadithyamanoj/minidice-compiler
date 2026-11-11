@@ -2,10 +2,11 @@
 #
 #   source env.sh
 #
-# Submodules under third_party/ are the source pins. The LLVM plugin, the
-# VEGAS conda toolchain, and the CGRA-Solve virtualenv are build products and
-# are not in those repositories. This file uses a toolchain that already
-# exists next to this checkout when the submodule itself has not been built.
+# Submodules under third_party/ are the source pins. The LLVM plugin and the
+# VEGAS conda toolchain are build products and are not in those repositories.
+# This file uses a toolchain that already exists next to this checkout when
+# the submodule itself has not been built. Place and route runs in the same
+# Python as the flow; it does not need the CGRA-Solve virtualenv.
 
 if [ -z "${BASH_VERSION:-}${ZSH_VERSION:-}" ]; then
     echo "minidice-env: source this file from bash or zsh" >&2
@@ -22,7 +23,6 @@ fi
 
 _MD_ROOT="$(cd "$(dirname "$_MD_ENV_FILE")" && pwd)"
 export MINIDICE_ROOT="$_MD_ROOT"
-export MINIDICE_CGRA_SOLVE="$_MD_ROOT/cgra-solve-local"
 export BOXMAN_ROOT="$_MD_ROOT/third_party/boxman"
 
 # Clang and the two Python environments are built outside this repo. Use one
@@ -49,6 +49,20 @@ else
     esac
 fi
 
+# The CUDA frontend needs a toolkit. Use one the caller named, else the
+# toolkit this flow was developed against.
+if [ -z "${CUDA_HOME:-}${CUDA_PATH:-}${CUDA_INSTALL_PATH:-}" ]; then
+    if [ -x /usr/local/cuda-11.7/bin/nvcc ]; then
+        export CUDA_INSTALL_PATH=/usr/local/cuda-11.7
+        export CUDA_HOME="$CUDA_INSTALL_PATH"
+        export CUDA_PATH="$CUDA_INSTALL_PATH"
+        case ":$PATH:" in
+            *":$CUDA_INSTALL_PATH/bin:"*) ;;
+            *) export PATH="$CUDA_INSTALL_PATH/bin:$PATH" ;;
+        esac
+    fi
+fi
+
 # The frontend loads libBoxmanFrontend.so from inside the boxman tree.
 _md_plugin="$BOXMAN_ROOT/llvm/build/libBoxmanFrontend.so"
 if [ ! -e "$BOXMAN_ROOT/llvm/build" ]; then
@@ -67,24 +81,9 @@ if [ ! -f "$_md_plugin" ]; then
     echo "minidice-env: Boxman LLVM plugin is not built at $_md_plugin" >&2
 fi
 
-if [ -z "${MINIDICE_MAPPER_PYTHON:-}" ]; then
-    for _cand in \
-        "$_MD_ROOT/cgra-solve-local/.venv/bin/python" \
-        "/data/${USER:-}/CGRA-Solve/.venv/bin/python"
-    do
-        if [ -x "$_cand" ]; then
-            export MINIDICE_MAPPER_PYTHON="$_cand"
-            break
-        fi
-    done
-fi
-if [ -z "${MINIDICE_MAPPER_PYTHON:-}" ]; then
-    echo "minidice-env: no CGRA-Solve interpreter; set MINIDICE_MAPPER_PYTHON" >&2
-fi
-
 echo "minidice-env: MINIDICE_ROOT=$MINIDICE_ROOT"
 echo "minidice-env: compiler python=${MINIDICE_COMPILER_PYTHON:-unset}"
-echo "minidice-env: mapper python=${MINIDICE_MAPPER_PYTHON:-unset}"
 echo "minidice-env: dora python=${MINIDICE_DORA_PYTHON:-unset}"
+echo "minidice-env: CUDA_HOME=${CUDA_HOME:-unset}"
 
 unset _MD_ENV_FILE _MD_ROOT _md_tools _md_plugin _cand _donor

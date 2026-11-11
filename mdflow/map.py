@@ -1,9 +1,9 @@
-"""Place and route Mini_Dice p-graphs with CGRA-Solve and report each latency.
+"""Unused. The flow places p-graphs with Boxman's mapper in vegas_map.py.
 
-Runs under CGRA-Solve's virtualenv, which is the only interpreter with the
-mapper installed. The latency it records is the switch-box flop count on the
-longest input-to-output path, the same number the chip's writeback uses to
-tag a result with the thread that produced it.
+This driver runs the vendored CGRA-Solve mapper and records the switch-box
+flop count on the longest input-to-output path. It is kept so that mapping
+can be compared against the previous results. It needs CGRA-Solve's
+virtualenv, and nothing in the flow calls it.
 
 Usage:
     map.py --dots DIR --out DIR

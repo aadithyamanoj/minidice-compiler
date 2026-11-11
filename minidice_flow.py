@@ -11,10 +11,11 @@ rather than miscompiled. The built-in `nn` workload supplies the quantized
 inputs for Rodinia's euclid nearest-neighbor kernel and the stores those
 inputs must produce.
 
-Boxman and DORA are submodules. CGRA-Solve is vendored as cgra-solve-local
-because that repository is private. The packers in tools/ and
-collateral/dice_config.vh are copies. env.sh names the interpreters and the
-LLVM plugin, which are build products and are not in those repositories.
+Boxman and DORA are submodules. Place and route uses Boxman's DICE mapper
+on an architecture built from the Mini_Dice routing graph in cgra-solve-local.
+The packers in tools/ and collateral/dice_config.vh are copies. env.sh names
+the interpreters and the LLVM plugin, which are build products and are not in
+those repositories.
 """
 from __future__ import annotations
 
@@ -28,11 +29,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from mdflow.lower import LowerError, build, lower, metadata  # noqa: E402
+from mdflow.vegas_map import map_dots  # noqa: E402
 from mdflow.workload import assemble, nn_inputs  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
 THIRD = ROOT / "third_party"
-CGRA_SOLVE = ROOT / "cgra-solve-local"
 DORA_REPO = THIRD / "dora"
 WORKSPACE = (DORA_REPO /
              "examples/devices/dice-isca/mini_dice/static-build/workspace.pkl")
@@ -62,13 +63,8 @@ def run_frontend(cuda: Path, kernel: str, grid: int, block: int,
 
 
 def run_mapper(dots: Path, out: Path) -> list:
-    env = os.environ.copy()
-    env["PYTHONPATH"] = (
-        str(CGRA_SOLVE / "src") + os.pathsep + env.get("PYTHONPATH", ""))
-    env["MINIDICE_CGRA_SOLVE"] = str(CGRA_SOLVE)
-    stage([os.environ["MINIDICE_MAPPER_PYTHON"], str(ROOT / "mdflow/map.py"),
-           "--dots", str(dots), "--out", str(out)], env=env)
-    return json.loads((out / "mapping.json").read_text())
+    """Boxman's DICE mapper, given the Mini_Dice fabric rather than VEGAS's."""
+    return map_dots(dots, out)
 
 
 def run_bitgen(mapped: Path, bins: Path) -> None:
@@ -144,8 +140,7 @@ def compile_kernel(args: argparse.Namespace) -> None:
     if not args.dfg and not args.cuda:
         raise SystemExit("give --cuda and --kernel, or --dfg")
     missing = [name for name in
-               ("MINIDICE_COMPILER_PYTHON", "MINIDICE_MAPPER_PYTHON",
-                "MINIDICE_DORA_PYTHON", "MINIDICE_CGRA_SOLVE")
+               ("MINIDICE_COMPILER_PYTHON", "MINIDICE_DORA_PYTHON")
                if name not in os.environ]
     if missing:
         raise SystemExit("source env.sh first (missing " + ", ".join(missing) + ")")

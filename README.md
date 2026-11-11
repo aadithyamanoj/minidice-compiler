@@ -2,9 +2,10 @@
 
 Compiles a CUDA kernel into the memory images the Mini_Dice chip loads.
 This repository does not simulate the chip. Submodules are the public
-repositories the flow uses as a whole. CGRA-Solve is private, so the mapper
-and the Mini_Dice architecture are copied in as `cgra-solve-local`. Scripts
-and the config header are copies too.
+repositories the flow uses as a whole. Place and route is Boxman's DICE
+mapper, given a Mini_Dice architecture built from `cgra-solve-local`. That
+directory is a copy of the private CGRA-Solve tree's routing graph and
+feature catalog, not a mapper. Scripts and the config header are copies too.
 
 ```
 git submodule update --init
@@ -26,15 +27,13 @@ CSRs change between them. For a stem `nn` the output directory holds:
 
 | Path | Repository | What this flow uses |
 | --- | --- | --- |
-| `third_party/boxman` | `pncel/boxman` `2729a56` | CUDA frontend. The rest of VEGAS is not used. |
+| `third_party/boxman` | `pncel/boxman` `2729a56` | CUDA frontend, and the DICE place-and-route mapper (`map_program`). |
 | `third_party/dora` | `pncel/dora` `f455a179` | bitstream generation and the taped-out fabric workspace |
 
-`cgra-solve-local` is a snapshot of `aadithyamanoj/DiceCGRA-Solve` `dice-mapper`
-`5a1a797`: the mapper under `src/` and `benchmarks/architectures/mini_dice_static`
-plus `benchmarks/schedules/mini_dice`. The other benchmark fabrics in that
-repository are not part of the snapshot. Its upstream is
-`polarbearsrock/CGRA-Solve`; the Mini_Dice mapping commits are only on the
-fork's `dice-mapper` branch.
+`cgra-solve-local` is not the mapper. It is the Mini_Dice architecture that
+gets passed into Boxman's mapper: the routing graph and the DORA feature
+catalog from `DiceCGRA-Solve` `dice-mapper` `5a1a797`. The mapper itself is
+unchanged VEGAS code. It places each p-graph onto that fabric.
 
 `tools/json_to_meta_mem.py`, `tools/bins_to_bitstream_mem.py`, and
 `tools/fasm_to_bin.py` are the packers from Mini-Dice-testkernels `26b7b24`.
@@ -42,10 +41,10 @@ fork's `dice-mapper` branch.
 Mini_Dice `1d28051`. The rest of the chip, the testbench, and BaseJump STL
 are not used.
 
-The LLVM plugin, the VEGAS conda toolchain, and the CGRA-Solve virtualenv are
-build products. `env.sh` uses copies already built on this machine when the
-submodule trees have not been built, and it says so. Set `VEGAS_TOOLS_ROOT`,
-`BOXMAN_BUILD`, or `MINIDICE_MAPPER_PYTHON` to point somewhere else.
+The LLVM plugin and the VEGAS conda toolchain are build products. `env.sh`
+uses copies already built on this machine when the submodule trees have not
+been built, and it says so. Set `VEGAS_TOOLS_ROOT` or `BOXMAN_BUILD` to point
+somewhere else.
 
 ## What the lowering does
 
@@ -76,7 +75,7 @@ frontend produces the dataflow graph; this flow retargets it:
 - `minidice_flow.py` runs the stages: frontend, lower, place and route, bitgen, pack.
 - `mdflow/lower.py` turns the dataflow graph into p-graphs.
 - `mdflow/workload.py` lays out the data memory and predicts the stores.
-- `mdflow/map.py` calls the vendored CGRA-Solve mapper. `source env.sh` selects
-  its interpreter, and the import path is `cgra-solve-local`.
+- `mdflow/vegas_map.py` turns the Mini_Dice routing graph into the architecture
+  document Boxman's mapper accepts, then places each p-graph and writes FASM.
 - `mdflow/frontend.py` calls the Boxman CUDA frontend.
 - `tools/` packs metadata and bitstreams. Bitgen runs against the DORA submodule.
