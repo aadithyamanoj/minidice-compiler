@@ -10,7 +10,8 @@ the fabric cannot execute is reported by name rather than miscompiled. The
 built-in `nn` workload supplies the quantized inputs for Rodinia's euclid
 nearest-neighbor kernel and checks the chip's stores against them.
 
-Collateral lives in third_party/ as git submodules. env.sh names the
+Boxman, CGRA-Solve, the chip, and BaseJump STL are submodules. The packers
+in tools/ are copies of the three scripts this flow calls. env.sh names the
 interpreters and the LLVM plugin, which are build products and are not in
 those repositories.
 """
@@ -30,17 +31,15 @@ from mdflow.workload import assemble, nn_inputs  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
 THIRD = ROOT / "third_party"
-VEGAS = THIRD / "vegas"
 CGRA_SOLVE = THIRD / "cgra-solve"
-DORA_REPO = THIRD / "dora"
-TESTKERNELS = THIRD / "testkernels"
 MINI_DICE = THIRD / "mini_dice"
+DORA_REPO = MINI_DICE / "dora"
 BSG_ROOT = THIRD / "basejump_stl"
 WORKSPACE = (DORA_REPO /
              "examples/devices/dice-isca/mini_dice/static-build/workspace.pkl")
-PACK_META = TESTKERNELS / "scripts/json_to_meta_mem.py"
-PACK_BITS = TESTKERNELS / "scripts/bins_to_bitstream_mem.py"
-PACK_FASM = TESTKERNELS / "scripts/fasm_to_bin.py"
+PACK_META = ROOT / "tools/json_to_meta_mem.py"
+PACK_BITS = ROOT / "tools/bins_to_bitstream_mem.py"
+PACK_FASM = ROOT / "tools/fasm_to_bin.py"
 DICE_CONFIG = MINI_DICE / "rtl/includes/dice_config.vh"
 
 WORKLOADS = {"nn": nn_inputs}

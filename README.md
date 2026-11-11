@@ -1,8 +1,9 @@
 # Mini_Dice compiler
 
 Compiles a CUDA kernel and runs it on the Mini_Dice chip in RTL simulation.
-This repository is the compiler. The frontend, the mapper, the bitstream
-generator, the chip, and BaseJump STL are submodules under `third_party/`.
+This repository is the compiler. Submodules are only the repositories the
+flow uses as a whole. Scripts that were a few files inside a larger repo are
+copied under `tools/`.
 
 ```
 git submodule update --init --recursive
@@ -23,18 +24,19 @@ reports `PASS` for all four CTAs.
 
 ## Submodules
 
-| Path | Repository | Pin |
+| Path | Repository | What this flow uses |
 | --- | --- | --- |
-| `third_party/vegas` | `pncel/VEGAS` (`feature/approx-sfu`) | frontend sources; boxman is nested |
-| `third_party/cgra-solve` | `aadithyamanoj/DiceCGRA-Solve` (`dice-mapper`) | place and route |
-| `third_party/dora` | `pncel/dora` | bitstream generation and the taped-out fabric workspace |
-| `third_party/testkernels` | `aadithyamanoj/Mini-Dice-testkernels` | metadata and bitstream packers |
-| `third_party/mini_dice` | `aadithyamanoj/Mini_Dice` | chip RTL and the VCS testbench |
-| `third_party/basejump_stl` | `bespoke-silicon-group/basejump_stl` (`uw_ee477_wi23`) | simulation filelist |
+| `third_party/boxman` | `pncel/boxman` `2729a56` | CUDA frontend. The rest of VEGAS is not used. |
+| `third_party/cgra-solve` | `aadithyamanoj/DiceCGRA-Solve` `dice-mapper` `5a1a797` | place and route, the Mini_Dice architecture, and the latency measurement |
+| `third_party/mini_dice` | `aadithyamanoj/Mini_Dice` `1d28051` | chip RTL and testbench. Its `dora` submodule is the bitstream generator and the taped-out fabric. |
+| `third_party/basejump_stl` | `bespoke-silicon-group/basejump_stl` `uw_ee477_wi23` | libraries the chip filelist compiles |
 
-`git submodule update --init --recursive` also checks out boxman inside VEGAS
-and DORA inside the chip. Bitgen uses `third_party/dora`, which is the same
-commit the chip pins, so the fabric workspace matches the RTL.
+`git submodule update --init --recursive` checks out DORA inside the chip.
+Bitgen uses that same checkout, so the fabric workspace matches the RTL.
+
+`tools/json_to_meta_mem.py`, `tools/bins_to_bitstream_mem.py`, and
+`tools/fasm_to_bin.py` are the packers from Mini-Dice-testkernels `26b7b24`.
+The rest of that repo is unused.
 
 The LLVM plugin, the VEGAS conda toolchain, and the CGRA-Solve virtualenv are
 build products. `env.sh` uses copies already built on this machine when the
@@ -82,7 +84,8 @@ frontend produces the dataflow graph; this flow retargets it:
 - `mdflow/workload.py` lays out the data memory and predicts the stores.
 - `mdflow/map.py` calls CGRA-Solve. `source env.sh` selects its interpreter,
   and the import path is this repo's submodule.
-- `mdflow/frontend.py` calls the VEGAS CUDA frontend.
+- `mdflow/frontend.py` calls the Boxman CUDA frontend.
+- `tools/` packs metadata and bitstreams. Bitgen runs against the chip's DORA submodule.
 
 The simulation reads a `{stem}_data.mem` image next to the runtime JSON. Kernels
 built by this flow ship one; the hand-written vectors in the chip's

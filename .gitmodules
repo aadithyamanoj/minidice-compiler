@@ -1,18 +1,12 @@
-[submodule "third_party/testkernels"]
-	path = third_party/testkernels
-	url = git@github.com:aadithyamanoj/Mini-Dice-testkernels.git
 [submodule "third_party/cgra-solve"]
 	path = third_party/cgra-solve
 	url = git@github.com:aadithyamanoj/DiceCGRA-Solve.git
-[submodule "third_party/dora"]
-	path = third_party/dora
-	url = git@github.com:pncel/dora.git
 [submodule "third_party/basejump_stl"]
 	path = third_party/basejump_stl
 	url = https://github.com/bespoke-silicon-group/basejump_stl.git
 [submodule "third_party/mini_dice"]
 	path = third_party/mini_dice
 	url = git@github.com:aadithyamanoj/Mini_Dice.git
-[submodule "third_party/vegas"]
-	path = third_party/vegas
-	url = git@github.com:pncel/VEGAS.git
+[submodule "third_party/boxman"]
+	path = third_party/boxman
+	url = git@github.com:pncel/boxman.git

@@ -23,13 +23,12 @@ fi
 _MD_ROOT="$(cd "$(dirname "$_MD_ENV_FILE")" && pwd)"
 export MINIDICE_ROOT="$_MD_ROOT"
 export MINIDICE_CGRA_SOLVE="$_MD_ROOT/third_party/cgra-solve"
-export BOXMAN_ROOT="$_MD_ROOT/third_party/vegas/compiler/boxman"
+export BOXMAN_ROOT="$_MD_ROOT/third_party/boxman"
 
-# Prefer a toolchain built inside the VEGAS submodule. Otherwise use one the
-# caller named, then the checkout this flow was developed against.
+# Clang and the two Python environments are built outside this repo. Use one
+# the caller named, then the VEGAS toolchain this flow was developed against.
 _md_tools=""
 for _cand in \
-    "$_MD_ROOT/third_party/vegas/build/vegas-rtl-tools-local/envs" \
     "${VEGAS_TOOLS_ROOT:-}" \
     "/data2/${USER:-}/VEGAS/build/vegas-rtl-tools-local/envs"
 do
