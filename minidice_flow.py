@@ -11,7 +11,8 @@ rather than miscompiled. The built-in `nn` workload supplies the quantized
 inputs for Rodinia's euclid nearest-neighbor kernel and the stores those
 inputs must produce.
 
-Boxman, CGRA-Solve, and DORA are submodules. The packers in tools/ and
+Boxman and DORA are submodules. CGRA-Solve is vendored as cgra-solve-local
+because that repository is private. The packers in tools/ and
 collateral/dice_config.vh are copies. env.sh names the interpreters and the
 LLVM plugin, which are build products and are not in those repositories.
 """
@@ -31,7 +32,7 @@ from mdflow.workload import assemble, nn_inputs  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
 THIRD = ROOT / "third_party"
-CGRA_SOLVE = THIRD / "cgra-solve"
+CGRA_SOLVE = ROOT / "cgra-solve-local"
 DORA_REPO = THIRD / "dora"
 WORKSPACE = (DORA_REPO /
              "examples/devices/dice-isca/mini_dice/static-build/workspace.pkl")

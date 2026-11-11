@@ -1,6 +1,3 @@
-[submodule "third_party/cgra-solve"]
-	path = third_party/cgra-solve
-	url = git@github.com:aadithyamanoj/DiceCGRA-Solve.git
 [submodule "third_party/boxman"]
 	path = third_party/boxman
 	url = git@github.com:pncel/boxman.git

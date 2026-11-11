@@ -1,0 +1,20 @@
+# Core dependencies
+numpy>=1.20.0
+networkx>=3.5
+pyyaml>=5.4
+typing-extensions>=4.0.0
+
+# Development dependencies
+pytest>=7.0
+pytest-cov>=3.0
+black>=22.0
+flake8>=4.0
+mypy>=0.950
+
+# Visualization dependencies (optional)
+matplotlib>=3.3
+graphviz>=0.16
+
+# Optimization dependencies (optional)
+scipy>=1.6
+pulp>=2.5

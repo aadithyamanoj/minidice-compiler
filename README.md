@@ -1,9 +1,10 @@
 # Mini_Dice compiler
 
 Compiles a CUDA kernel into the memory images the Mini_Dice chip loads.
-This repository does not simulate the chip. Submodules are only the
-repositories the flow uses as a whole. Scripts and the config header, which
-were a few files inside a larger repo, are copied in.
+This repository does not simulate the chip. Submodules are the public
+repositories the flow uses as a whole. CGRA-Solve is private, so the mapper
+and the Mini_Dice architecture are copied in as `cgra-solve-local`. Scripts
+and the config header are copies too.
 
 ```
 git submodule update --init
@@ -26,8 +27,14 @@ CSRs change between them. For a stem `nn` the output directory holds:
 | Path | Repository | What this flow uses |
 | --- | --- | --- |
 | `third_party/boxman` | `pncel/boxman` `2729a56` | CUDA frontend. The rest of VEGAS is not used. |
-| `third_party/cgra-solve` | `aadithyamanoj/DiceCGRA-Solve` `dice-mapper` `5a1a797` | place and route, the Mini_Dice architecture, and the latency measurement |
 | `third_party/dora` | `pncel/dora` `f455a179` | bitstream generation and the taped-out fabric workspace |
+
+`cgra-solve-local` is a snapshot of `aadithyamanoj/DiceCGRA-Solve` `dice-mapper`
+`5a1a797`: the mapper under `src/` and `benchmarks/architectures/mini_dice_static`
+plus `benchmarks/schedules/mini_dice`. The other benchmark fabrics in that
+repository are not part of the snapshot. Its upstream is
+`polarbearsrock/CGRA-Solve`; the Mini_Dice mapping commits are only on the
+fork's `dice-mapper` branch.
 
 `tools/json_to_meta_mem.py`, `tools/bins_to_bitstream_mem.py`, and
 `tools/fasm_to_bin.py` are the packers from Mini-Dice-testkernels `26b7b24`.
@@ -69,7 +76,7 @@ frontend produces the dataflow graph; this flow retargets it:
 - `minidice_flow.py` runs the stages: frontend, lower, place and route, bitgen, pack.
 - `mdflow/lower.py` turns the dataflow graph into p-graphs.
 - `mdflow/workload.py` lays out the data memory and predicts the stores.
-- `mdflow/map.py` calls CGRA-Solve. `source env.sh` selects its interpreter,
-  and the import path is this repo's submodule.
+- `mdflow/map.py` calls the vendored CGRA-Solve mapper. `source env.sh` selects
+  its interpreter, and the import path is `cgra-solve-local`.
 - `mdflow/frontend.py` calls the Boxman CUDA frontend.
 - `tools/` packs metadata and bitstreams. Bitgen runs against the DORA submodule.

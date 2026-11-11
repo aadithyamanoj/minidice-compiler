@@ -1,0 +1,78 @@
+digraph {
+	// Mini_Dice: 4x4 PE array, INT16 ALU (add/sub/mul), combinational ALU.
+	// Every PE->SB->PE data path passes through one output register in the SB,
+	// so all inter-op network latencies have LOWER_BOUND = 1.
+
+	// DFG infrastructure ops (no physical FU, handled by scheduler/router)
+	input[OP_LATENCY = 0]
+	output[OP_LATENCY = 0]
+	phi[OP_LATENCY = 0]
+	const[OP_LATENCY = 0]
+
+	// Compute ops mapped to alu_inst (combinational; SB registers provide pipeline)
+	add[OP_LATENCY = 0]
+	sub[OP_LATENCY = 0]
+	mul[OP_LATENCY = 0]
+
+	// Predicated mux mapped to phi_mux_inst (3 inputs: pred, true, false → out;
+	// combinational, latency 0). Dora exports the FU op as `optype: PHI` but
+	// it is a data-flow select; user kernels target it via `select`.
+	select[OP_LATENCY = 0]
+
+	// input -> compute
+	"input"->"add"    [LOWER_BOUND_NETWORK_LATENCY = 2, UPPER_BOUND_NETWORK_LATENCY = 1000000];
+	"input"->"sub"    [LOWER_BOUND_NETWORK_LATENCY = 2, UPPER_BOUND_NETWORK_LATENCY = 1000000];
+	"input"->"mul"    [LOWER_BOUND_NETWORK_LATENCY = 2, UPPER_BOUND_NETWORK_LATENCY = 1000000];
+	"input"->"output" [LOWER_BOUND_NETWORK_LATENCY = 1, UPPER_BOUND_NETWORK_LATENCY = 1000000];
+	"input"->"phi"    [LOWER_BOUND_NETWORK_LATENCY = 1, UPPER_BOUND_NETWORK_LATENCY = 1000000];
+
+	// const -> compute (fixed 1-hop: const is embedded at schedule time)
+	"const"->"add"    [LOWER_BOUND_NETWORK_LATENCY = 1, UPPER_BOUND_NETWORK_LATENCY = 1];
+	"const"->"sub"    [LOWER_BOUND_NETWORK_LATENCY = 1, UPPER_BOUND_NETWORK_LATENCY = 1];
+	"const"->"mul"    [LOWER_BOUND_NETWORK_LATENCY = 1, UPPER_BOUND_NETWORK_LATENCY = 1];
+	"const"->"output" [LOWER_BOUND_NETWORK_LATENCY = 1, UPPER_BOUND_NETWORK_LATENCY = 1];
+	"const"->"phi"    [LOWER_BOUND_NETWORK_LATENCY = 0, UPPER_BOUND_NETWORK_LATENCY = 0];
+
+	// phi -> compute
+	"phi"->"add"    [LOWER_BOUND_NETWORK_LATENCY = 1, UPPER_BOUND_NETWORK_LATENCY = 1000000];
+	"phi"->"sub"    [LOWER_BOUND_NETWORK_LATENCY = 1, UPPER_BOUND_NETWORK_LATENCY = 1000000];
+	"phi"->"mul"    [LOWER_BOUND_NETWORK_LATENCY = 1, UPPER_BOUND_NETWORK_LATENCY = 1000000];
+	"phi"->"output" [LOWER_BOUND_NETWORK_LATENCY = 1, UPPER_BOUND_NETWORK_LATENCY = 1000000];
+
+	// add -> *
+	"add"->"output" [LOWER_BOUND_NETWORK_LATENCY = 1, UPPER_BOUND_NETWORK_LATENCY = 1000000];
+	"add"->"phi"    [LOWER_BOUND_NETWORK_LATENCY = 1, UPPER_BOUND_NETWORK_LATENCY = 1000000];
+	"add"->"add"    [LOWER_BOUND_NETWORK_LATENCY = 1, UPPER_BOUND_NETWORK_LATENCY = 1000000];
+	"add"->"sub"    [LOWER_BOUND_NETWORK_LATENCY = 1, UPPER_BOUND_NETWORK_LATENCY = 1000000];
+	"add"->"mul"    [LOWER_BOUND_NETWORK_LATENCY = 1, UPPER_BOUND_NETWORK_LATENCY = 1000000];
+
+	// sub -> *
+	"sub"->"output" [LOWER_BOUND_NETWORK_LATENCY = 1, UPPER_BOUND_NETWORK_LATENCY = 1000000];
+	"sub"->"phi"    [LOWER_BOUND_NETWORK_LATENCY = 1, UPPER_BOUND_NETWORK_LATENCY = 1000000];
+	"sub"->"add"    [LOWER_BOUND_NETWORK_LATENCY = 1, UPPER_BOUND_NETWORK_LATENCY = 1000000];
+	"sub"->"sub"    [LOWER_BOUND_NETWORK_LATENCY = 1, UPPER_BOUND_NETWORK_LATENCY = 1000000];
+	"sub"->"mul"    [LOWER_BOUND_NETWORK_LATENCY = 1, UPPER_BOUND_NETWORK_LATENCY = 1000000];
+
+	// mul -> *
+	"mul"->"output" [LOWER_BOUND_NETWORK_LATENCY = 1, UPPER_BOUND_NETWORK_LATENCY = 1000000];
+	"mul"->"phi"    [LOWER_BOUND_NETWORK_LATENCY = 1, UPPER_BOUND_NETWORK_LATENCY = 1000000];
+	"mul"->"add"    [LOWER_BOUND_NETWORK_LATENCY = 1, UPPER_BOUND_NETWORK_LATENCY = 1000000];
+	"mul"->"sub"    [LOWER_BOUND_NETWORK_LATENCY = 1, UPPER_BOUND_NETWORK_LATENCY = 1000000];
+	"mul"->"mul"    [LOWER_BOUND_NETWORK_LATENCY = 1, UPPER_BOUND_NETWORK_LATENCY = 1000000];
+
+	// * -> select (any source feeds the predicated mux)
+	"input"->"select"  [LOWER_BOUND_NETWORK_LATENCY = 2, UPPER_BOUND_NETWORK_LATENCY = 1000000];
+	"const"->"select"  [LOWER_BOUND_NETWORK_LATENCY = 1, UPPER_BOUND_NETWORK_LATENCY = 1];
+	"phi"->"select"    [LOWER_BOUND_NETWORK_LATENCY = 1, UPPER_BOUND_NETWORK_LATENCY = 1000000];
+	"add"->"select"    [LOWER_BOUND_NETWORK_LATENCY = 1, UPPER_BOUND_NETWORK_LATENCY = 1000000];
+	"sub"->"select"    [LOWER_BOUND_NETWORK_LATENCY = 1, UPPER_BOUND_NETWORK_LATENCY = 1000000];
+	"mul"->"select"    [LOWER_BOUND_NETWORK_LATENCY = 1, UPPER_BOUND_NETWORK_LATENCY = 1000000];
+	"select"->"select" [LOWER_BOUND_NETWORK_LATENCY = 1, UPPER_BOUND_NETWORK_LATENCY = 1000000];
+
+	// select -> *
+	"select"->"output" [LOWER_BOUND_NETWORK_LATENCY = 1, UPPER_BOUND_NETWORK_LATENCY = 1000000];
+	"select"->"add"    [LOWER_BOUND_NETWORK_LATENCY = 1, UPPER_BOUND_NETWORK_LATENCY = 1000000];
+	"select"->"sub"    [LOWER_BOUND_NETWORK_LATENCY = 1, UPPER_BOUND_NETWORK_LATENCY = 1000000];
+	"select"->"mul"    [LOWER_BOUND_NETWORK_LATENCY = 1, UPPER_BOUND_NETWORK_LATENCY = 1000000];
+	"select"->"phi"    [LOWER_BOUND_NETWORK_LATENCY = 1, UPPER_BOUND_NETWORK_LATENCY = 1000000];
+}

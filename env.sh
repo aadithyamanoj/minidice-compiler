@@ -22,7 +22,7 @@ fi
 
 _MD_ROOT="$(cd "$(dirname "$_MD_ENV_FILE")" && pwd)"
 export MINIDICE_ROOT="$_MD_ROOT"
-export MINIDICE_CGRA_SOLVE="$_MD_ROOT/third_party/cgra-solve"
+export MINIDICE_CGRA_SOLVE="$_MD_ROOT/cgra-solve-local"
 export BOXMAN_ROOT="$_MD_ROOT/third_party/boxman"
 
 # Clang and the two Python environments are built outside this repo. Use one
@@ -69,7 +69,7 @@ fi
 
 if [ -z "${MINIDICE_MAPPER_PYTHON:-}" ]; then
     for _cand in \
-        "$_MD_ROOT/third_party/cgra-solve/.venv/bin/python" \
+        "$_MD_ROOT/cgra-solve-local/.venv/bin/python" \
         "/data/${USER:-}/CGRA-Solve/.venv/bin/python"
     do
         if [ -x "$_cand" ]; then
