@@ -1,0 +1,132 @@
+diff --git a/tb/cgra_core/dice_core/dpi_dice_core_runtime.cpp b/tb/cgra_core/dice_core/dpi_dice_core_runtime.cpp
+index 99954bd..9d182a3 100644
+--- a/tb/cgra_core/dice_core/dpi_dice_core_runtime.cpp
++++ b/tb/cgra_core/dice_core/dpi_dice_core_runtime.cpp
+@@ -50,6 +50,14 @@ std::uint32_t g_csr_values[8] = {};
+ std::vector<std::array<std::uint32_t, 8>> g_per_cta_csr;
+ std::vector<std::array<bool, 8>>          g_per_cta_present;
+ 
++// Kernel data memory, keyed by the 16-bit word address the fabric emits on a
++// load or store. Populated from "<stem>_data.mem" when that file sits next to
++// the runtime JSON. The hand-written vectors ship no such file and keep the
++// historical "read returns addr & 0xFFFF" behavior; a compiled kernel supplies
++// one and reads its own inputs back.
++std::unordered_map<std::uint32_t, std::uint32_t> g_data_words;
++bool g_have_data_image = false;
++
+ std::vector<ExpectedWrite> g_expected_writes;
+ std::vector<bool> g_expected_matched;
+ std::vector<ExpectedWrite> g_actual_writes;  // all observed AXI writes
+@@ -328,8 +336,36 @@ void parse_per_cta_overrides(const std::string& text) {
+   }
+ }
+ 
++// "<stem>_data.mem": one "addr data" hex pair per line, both 16-bit. addr is
++// the word address the kernel computes; data is the halfword it should read.
++void load_data_image(const std::string& path) {
++  std::ifstream stream(path);
++  if (!stream) {
++    throw std::runtime_error("Could not open data image '" + path + "'");
++  }
++  std::string line;
++  while (std::getline(stream, line)) {
++    line = trim(line);
++    if (line.empty() || line[0] == '/' || line[0] == '#') {
++      continue;
++    }
++    std::stringstream ss(line);
++    std::string addr_text;
++    std::string data_text;
++    ss >> addr_text >> data_text;
++    if (addr_text.empty() || data_text.empty()) {
++      continue;
++    }
++    const auto addr = static_cast<std::uint32_t>(std::stoul(addr_text, nullptr, 16));
++    const auto data = static_cast<std::uint32_t>(std::stoul(data_text, nullptr, 16));
++    g_data_words[addr] = data & 0xFFFFu;
++  }
++  g_have_data_image = true;
++}
++
+ void load_runtime_json(const std::string& path) {
+-  const std::string text = read_text_file(resolve_input_path(path));
++  const std::string resolved = resolve_input_path(path);
++  const std::string text = read_text_file(resolved);
+ 
+   for (std::uint32_t idx = 0; idx < 8; ++idx) {
+     const std::regex csr_re(
+@@ -364,6 +400,22 @@ void load_runtime_json(const std::string& path) {
+   g_expected_matched.assign(g_expected_writes.size(), false);
+ 
+   parse_per_cta_overrides(text);
++
++  // Optional kernel data image. The name mirrors the runtime JSON's stem, so
++  // the testbench needs no new plusarg and the hand-written vectors, which
++  // have no sibling image, are left exactly as they were.
++  g_data_words.clear();
++  g_have_data_image = false;
++  const std::string runtime_suffix = "_runtime.json";
++  if (resolved.size() >= runtime_suffix.size() &&
++      resolved.compare(resolved.size() - runtime_suffix.size(),
++                       runtime_suffix.size(), runtime_suffix) == 0) {
++    const std::string data_path =
++        resolved.substr(0, resolved.size() - runtime_suffix.size()) + "_data.mem";
++    if (file_exists(data_path)) {
++      load_data_image(data_path);
++    }
++  }
+ }
+ 
+ std::uint32_t meta_read16(std::uint32_t byte_addr) {
+@@ -424,6 +476,8 @@ void dice_core_tb_init(
+   g_expected_writes.clear();
+   g_expected_matched.clear();
+   g_actual_writes.clear();
++  g_data_words.clear();
++  g_have_data_image = false;
+   g_observed_write_count = 0;
+   g_error_count = 0;
+ 
+@@ -504,6 +558,15 @@ unsigned int dice_core_tb_bitstream_read32(unsigned int byte_addr) {
+ }
+ 
+ unsigned int dice_core_tb_axi_read16(unsigned int addr) {
++  if (g_have_data_image) {
++    const auto it = g_data_words.find(addr);
++    if (it != g_data_words.end()) {
++      return it->second;
++    }
++    // The image is the whole memory: an address the kernel never wrote and
++    // the host never initialized reads as zero, not as its own address.
++    return 0u;
++  }
+   return addr & 0xFFFFu;
+ }
+ 
+@@ -516,6 +579,11 @@ void dice_core_tb_record_axi_write(
+ 
+   g_actual_writes.push_back({addr, d, s});
+ 
++  // A store is visible to a later load in the same kernel.
++  if (g_have_data_image) {
++    g_data_words[addr] = d;
++  }
++
+   if (g_expected_writes.empty()) {
+     return;
+   }
+diff --git a/tb/mini_dice/tb_chip_top.sv b/tb/mini_dice/tb_chip_top.sv
+index ba39efd..5ed8ce8 100644
+--- a/tb/mini_dice/tb_chip_top.sv
++++ b/tb/mini_dice/tb_chip_top.sv
+@@ -1164,8 +1164,10 @@ module tb_chip_top;
+   initial begin
+     int unsigned ok;
+ 
++`ifndef NO_FSDB
+     $fsdbDumpfile("waveform.fsdb");
+     $fsdbDumpvars(0, tb_chip_top, "+struct", "+mda");
++`endif
+ 
+     init_paths();
+     bsg_link_bringup();
