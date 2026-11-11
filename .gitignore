@@ -2,7 +2,3 @@ __pycache__/
 *.pyc
 build/
 .env
-*.fsdb
-simv
-simv.daidir/
-csrc/

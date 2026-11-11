@@ -1,19 +1,19 @@
-"""Compile a CUDA kernel and run it on the Mini_Dice chip in simulation.
+"""Compile a CUDA kernel into the Mini_Dice memory images.
 
     source env.sh
     python3 minidice_flow.py --cuda KERNEL.cu --kernel MANGLED --grid N \
         --block 16 --workload nn --out DIR
 
-The CUDA is lowered by the VEGAS frontend, retargeted onto Mini_Dice's INT16
-fabric, placed and routed, and then run through the chip testbench. A kernel
-the fabric cannot execute is reported by name rather than miscompiled. The
-built-in `nn` workload supplies the quantized inputs for Rodinia's euclid
-nearest-neighbor kernel and checks the chip's stores against them.
+The CUDA is lowered by the Boxman frontend, retargeted onto Mini_Dice's INT16
+fabric, placed and routed, and packed into the metadata, bitstream, and data
+images the chip loads. A kernel the fabric cannot execute is reported by name
+rather than miscompiled. The built-in `nn` workload supplies the quantized
+inputs for Rodinia's euclid nearest-neighbor kernel and the stores those
+inputs must produce.
 
-Boxman, CGRA-Solve, the chip, and BaseJump STL are submodules. The packers
-in tools/ are copies of the three scripts this flow calls. env.sh names the
-interpreters and the LLVM plugin, which are build products and are not in
-those repositories.
+Boxman, CGRA-Solve, and DORA are submodules. The packers in tools/ and
+collateral/dice_config.vh are copies. env.sh names the interpreters and the
+LLVM plugin, which are build products and are not in those repositories.
 """
 from __future__ import annotations
 
@@ -32,15 +32,13 @@ from mdflow.workload import assemble, nn_inputs  # noqa: E402
 ROOT = Path(__file__).resolve().parent
 THIRD = ROOT / "third_party"
 CGRA_SOLVE = THIRD / "cgra-solve"
-MINI_DICE = THIRD / "mini_dice"
-DORA_REPO = MINI_DICE / "dora"
-BSG_ROOT = THIRD / "basejump_stl"
+DORA_REPO = THIRD / "dora"
 WORKSPACE = (DORA_REPO /
              "examples/devices/dice-isca/mini_dice/static-build/workspace.pkl")
 PACK_META = ROOT / "tools/json_to_meta_mem.py"
 PACK_BITS = ROOT / "tools/bins_to_bitstream_mem.py"
 PACK_FASM = ROOT / "tools/fasm_to_bin.py"
-DICE_CONFIG = MINI_DICE / "rtl/includes/dice_config.vh"
+DICE_CONFIG = ROOT / "collateral/dice_config.vh"
 
 WORKLOADS = {"nn": nn_inputs}
 
@@ -141,48 +139,7 @@ def _runtime(program, result: dict) -> dict:
     }
 
 
-def build_simv(build_dir: Path) -> Path:
-    """Compile the chip testbench once and reuse it."""
-    simv = build_dir / "simv"
-    dpi = MINI_DICE / "tb/cgra_core/dice_core/dpi_dice_core_runtime.cpp"
-    newest = max(_source_mtime(), dpi.stat().st_mtime)
-    if simv.exists() and simv.stat().st_mtime >= newest:
-        return simv
-
-    build_dir.mkdir(parents=True, exist_ok=True)
-    files = build_dir / "files.f"
-    stage([sys.executable, str(MINI_DICE / "tb/vcs/gen_filelist.py"),
-           "--bsg-root", str(BSG_ROOT), "--out", str(files)])
-    vcs = (
-        f"module load vcs/X-2025.06 && cd {build_dir} && "
-        f"vcs -full64 -sverilog -timescale=1ns/1ps +lint=TFIPC-L "
-        f"+define+NO_FSDB -assert svaext -ignore initializer_driver_checks "
-        f"-f {files} {dpi} -CFLAGS '-std=c++17 -O2' -top tb_chip_top "
-        f"-o {simv} -j16"
-    )
-    # VCS generates C that the conda compiler rejects, so this runs under the
-    # system compiler with a clean environment.
-    stage(["env", "-i", f"HOME={os.environ['HOME']}", f"USER={os.environ['USER']}",
-           "PATH=/usr/bin:/bin", "bash", "-lc", vcs])
-    return simv
-
-
-def _source_mtime() -> float:
-    newest = 0.0
-    for path in (MINI_DICE / "rtl").rglob("*"):
-        if path.is_file():
-            newest = max(newest, path.stat().st_mtime)
-    return newest
-
-
-def run_sim(simv: Path, stem: str, out: Path) -> None:
-    env = os.environ.copy()
-    env["DICE_HOME"] = str(MINI_DICE)
-    stage([str(simv), f"+TEST_VECTOR={stem}", f"+TEST_VECTOR_DIR={out}",
-           "+SETTLE=40000"], cwd=out, env=env)
-
-
-def compile_and_run(args: argparse.Namespace) -> None:
+def compile_kernel(args: argparse.Namespace) -> None:
     if not args.dfg and not args.cuda:
         raise SystemExit("give --cuda and --kernel, or --dfg")
     missing = [name for name in
@@ -230,9 +187,6 @@ def compile_and_run(args: argparse.Namespace) -> None:
     result = assemble(program, inputs)
     write_vector(program, mapping, result, args.stem, out)
 
-    simv = build_simv(ROOT / "build")
-    run_sim(simv, args.stem, out)
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -249,4 +203,4 @@ def parse_args() -> argparse.Namespace:
 
 
 if __name__ == "__main__":
-    compile_and_run(parse_args())
+    compile_kernel(parse_args())

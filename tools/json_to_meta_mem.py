@@ -45,8 +45,7 @@ DEFAULT_RTL_DEFINES: dict[str, int] = {
 }
 
 DEFAULT_CONFIG_PATHS = (
-    Path(__file__).resolve().parents[1]
-    / "third_party/mini_dice/rtl/includes/dice_config.vh",
+    Path(__file__).resolve().parents[1] / "collateral/dice_config.vh",
 )
 
 # tb_dice_core.sv:  WORD_SIZE = 256 bytes  -> 2048-bit metadata memory width

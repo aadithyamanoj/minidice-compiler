@@ -21,7 +21,7 @@ from pathlib import Path
 
 
 DEFAULT_DORA_REPO = (Path(__file__).resolve().parents[1]
-                     / "third_party/mini_dice/dora")
+                     / "third_party/dora")
 DEFAULT_WORKSPACE = (
     DEFAULT_DORA_REPO
     / "examples/devices/dice-isca/mini_dice/static-build/workspace.pkl"
