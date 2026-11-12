@@ -30,7 +30,11 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from mdflow.lower import LowerError, build, lower, metadata  # noqa: E402
 from mdflow.vegas_map import map_dots  # noqa: E402
-from mdflow.workload import assemble, nn_inputs  # noqa: E402
+from mdflow.workload import (  # noqa: E402
+    assemble, attn_apply_inputs, attn_mix_inputs, attn_score_inputs,
+    horner_inputs, sine_inputs,
+    fir3_inputs, gemm_k2_inputs, hadamard_inputs, nn_inputs, saxpy_inputs,
+)
 
 ROOT = Path(__file__).resolve().parent
 THIRD = ROOT / "third_party"
@@ -42,7 +46,18 @@ PACK_BITS = ROOT / "tools/bins_to_bitstream_mem.py"
 PACK_FASM = ROOT / "tools/fasm_to_bin.py"
 DICE_CONFIG = ROOT / "collateral/dice_config.vh"
 
-WORKLOADS = {"nn": nn_inputs}
+WORKLOADS = {
+    "nn": nn_inputs,
+    "saxpy": saxpy_inputs,
+    "hadamard": hadamard_inputs,
+    "fir3": fir3_inputs,
+    "gemm_k2": gemm_k2_inputs,
+    "attn_score": attn_score_inputs,
+    "attn_mix": attn_mix_inputs,
+    "attn_apply": attn_apply_inputs,
+    "horner": horner_inputs,
+    "sine": sine_inputs,
+}
 
 
 def stage(cmd: list, **kwargs) -> None:
@@ -166,7 +181,8 @@ def compile_kernel(args: argparse.Namespace) -> None:
         print(f"  approximation: {note}")
 
     program = build(lowered)
-    print(f"{len(program.graphs)} p-graphs, {len(program.gpr_of)} registers")
+    print(f"{len(program.graphs)} p-graphs, "
+          f"{len(set(program.gpr_of.values()))} registers")
 
     dots = out / "dots"
     dots.mkdir(exist_ok=True)

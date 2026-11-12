@@ -15,9 +15,12 @@ python3 minidice_flow.py \
     --grid 4 --block 16 --workload nn --stem nn --out build/nn
 ```
 
-`--grid` times `--block` is the number of threads. The chip runs one block of
-16 at a time, so a larger grid is several serial CTAs and the pointer-base
-CSRs change between them. For a stem `nn` the output directory holds:
+`--grid` times `--block` is the number of lanes. The chip runs 16 threads
+at a time. A wider block is split into CTAs of 16 and the grid grows so the
+same lanes still run; the host changes the pointer-base CSRs between those
+CTAs. One pointer can use several of the eight base CSRs when it is indexed
+more than one way. In a 16-wide tile the column is the local thread id and
+the row is the CTA index. For a stem `nn` the output directory holds:
 
 - `nn_cta_desc.mem`, `nn_meta.mem`, `nn_bitstream.mem`
 - `nn_runtime.json` (CSR values, per-CTA pointer bases, expected stores)

@@ -10,6 +10,7 @@ which output, and an ALU opcode is the add/sub/mul placed on that PE.
 """
 from __future__ import annotations
 
+import heapq
 import json
 import re
 import sys
@@ -361,7 +362,11 @@ def _fasm(mapped: dict, widths: dict, layout_hash: str) -> tuple[str, int]:
     cycles = {arrival[name] for name in outputs}
     if len(cycles) != 1:
         raise ValueError(f"outputs arrive on different cycles {sorted(cycles)}")
-    flops.append(max(1, cycles.pop()))
+    latency = max(1, cycles.pop())
+    if latency > 15:
+        raise ValueError(
+            f"p-graph latency {latency} does not fit in the 4-bit field")
+    flops.append(latency)
     lines = [
         "# Dora CGRA FASM Configuration",
         f"# dora_layout_hash: {layout_hash}",
@@ -395,32 +400,103 @@ def _arrivals(arch, spec: dict, routes: dict) -> tuple[dict, dict]:
 
 
 def _balance(arch, spec: dict, mapped: dict) -> None:
-    """Re-route inputs that arrive early so every operand meets on one cycle.
+    """Lengthen paths that arrive early so both operands meet on one cycle.
 
-    The router prefers the shortest path, and a value computed by another PE
-    has already passed through more switchboxes than a value read from a pin.
-    The switchboxes are the only registers, so the short path is sent through
-    extra ones by making its current edges expensive and routing again.
+    A switchbox output is the only register, so a value read from a pin takes
+    the shortest route and shows up before a value that has already passed
+    through the chain. The route that is already on time stays. Each early
+    route is replaced by a path with exactly the missing number of registers.
     """
     config = mapped["configurations"][0]
-    bumped: list[tuple[dict, int]] = []
-    try:
-        for _ in range(24):
-            _, paths_at = _arrivals(arch, spec, config["routes"])
-            early = [path for paths in paths_at.values() for path, reached in paths
-                     if reached < max(item[1] for item in paths)]
-            if not early:
-                return
-            for path in early:
+    routes = config["routes"]
+    arrival, paths_at = _arrivals(arch, spec, routes)
+    owners: dict[str, set] = {}
+    choices: dict[str, str] = {}
+    settings: dict[str, int] = {}
+    early = []
+
+    def claim(edge_id: str, net_id: str) -> None:
+        owners.setdefault(edge_id, set()).add(net_id)
+        edge = arch.edges[edge_id]
+        if "select" in edge:
+            choices[edge["select"]] = edge["setting"]
+        for feature in edge.get("features", []):
+            settings[feature["feature_name"]] = feature["value"]
+        if "xbar" in edge:
+            width = XBAR_SEL_WIDTH[edge["xbar"]]
+            shift = edge["xbar_output"] * width
+            mask = ((1 << width) - 1) << shift
+            packed = settings.get(edge["xbar"], 0)
+            settings[edge["xbar"]] = (packed & ~mask) | (edge["xbar_input"] << shift)
+
+    def conflicts(edge: dict) -> bool:
+        if "select" in edge and choices.get(edge["select"]) not in (None, edge["setting"]):
+            return True
+        for feature in edge.get("features", []):
+            current = settings.get(feature["feature_name"])
+            if current is not None and current != feature["value"]:
+                return True
+        if "xbar" in edge:
+            width = XBAR_SEL_WIDTH[edge["xbar"]]
+            shift = edge["xbar_output"] * width
+            mask = ((1 << width) - 1) << shift
+            field = (settings.get(edge["xbar"], 0) & mask) >> shift
+            if field not in (0, edge["xbar_input"]):
+                return True
+        return False
+
+    for net in spec["nets"]:
+        source_cycle = arrival[net["source"][0]]
+        for index, sink in enumerate(net["sinks"]):
+            path = routes[net["id"]][index]
+            path_latency = sum(arch.edges[edge].get("latency", 0) for edge in path)
+            target = max(reached for _, reached in paths_at[sink[0]])
+            if source_cycle + path_latency == target:
                 for edge_id in path:
-                    edge = arch.edges[edge_id]
-                    bumped.append((edge, edge.get("cost", 1)))
-                    edge["cost"] = edge.get("cost", 1) + 25
-            config["routes"] = route_configuration(
-                arch, spec, config["placement"])
-    finally:
-        for edge, cost in reversed(bumped):
-            edge["cost"] = cost
+                    claim(edge_id, net["id"])
+            elif source_cycle + path_latency < target:
+                early.append((target - source_cycle, net["id"], index, path))
+            else:
+                raise ValueError(f"{sink[0]} is reached after its operation")
+    if not early:
+        return
+
+    def exact(source: str, target: str, need: int, net_id: str):
+        best = {(source, 0): 0}
+        queue = [(0, source, 0, ())]
+        while queue:
+            cost, port, latency, path = heapq.heappop(queue)
+            if cost != best.get((port, latency)):
+                continue
+            if port == target and latency == need and path:
+                return path
+            if latency > need or len(path) > 80:
+                continue
+            for edge_id in arch.adjacency[port]:
+                edge = arch.edges[edge_id]
+                held = owners.get(edge_id)
+                if held and net_id not in held:
+                    continue
+                if conflicts(edge):
+                    continue
+                dest = edge["sink"]
+                next_latency = latency + edge.get("latency", 0)
+                if next_latency > need or any(arch.edges[prev]["sink"] == dest for prev in path):
+                    continue
+                next_cost = cost + edge.get("cost", 1)
+                key = (dest, next_latency)
+                if next_cost < best.get(key, 10 ** 18):
+                    best[key] = next_cost
+                    heapq.heappush(queue, (next_cost, dest, next_latency, path + (edge_id,)))
+        return None
+
+    for need, net_id, index, path in sorted(early, reverse=True):
+        found = exact(arch.edges[path[0]]["source"], arch.edges[path[-1]]["sink"], need, net_id)
+        if found is None:
+            raise ValueError(f"no {need}-cycle route for {net_id}")
+        for edge_id in found:
+            claim(edge_id, net_id)
+        routes[net_id][index] = list(found)
 
 
 def map_dots(dots: Path, out: Path, attempts: int = 40) -> list:
@@ -432,9 +508,23 @@ def map_dots(dots: Path, out: Path, attempts: int = 40) -> list:
         started = time.time()
         try:
             program = _program(dot.read_text())
-            mapped = map_program(program, arch, attempts=attempts)
-            _balance(arch, program["configurations"][0], mapped)
-            text, latency = _fasm(mapped, widths, layout_hash)
+            # A different placement is tried when the first one has no route
+            # long enough to line the operands up.
+            mapped = None
+            text = None
+            latency = None
+            error = None
+            for seed in range(11, 15):
+                try:
+                    mapped = map_program(program, arch, seed=seed, attempts=attempts)
+                    _balance(arch, program["configurations"][0], mapped)
+                    text, latency = _fasm(mapped, widths, layout_hash)
+                    error = None
+                    break
+                except (MappingFailure, ValueError) as failure:
+                    error = failure
+            if error is not None:
+                raise error
             (out / f"{dot.stem}.fasm").write_text(text)
             record = {"dot": str(dot), "status": "success",
                       "seconds": round(time.time() - started, 3),

@@ -14,12 +14,13 @@ and the rewrites below record each such approximation instead of applying it
 silently.
 
 Addresses in the DFG are byte addresses. The chip's data memory is 16-bit
-word addressed, so an address is rewritten as
+word addressed, and a CTA is 16 threads, so an address is rewritten as
 
-    word = csr_base + thread_id * stride + offset
+    word = csr_base + local_thread * stride + offset
 
-where the CSR holds the array's word base and the host reprograms that base
-between CTAs, because the fabric only ever sees the local thread id.
+The CSR holds the array's word base plus this CTA's share of the index. A
+pointer used with two different index formulas gets two base CSRs; the fabric
+broadcasts eight. The fabric only ever sees the local thread id.
 """
 from __future__ import annotations
 
@@ -52,23 +53,91 @@ NUM_MEM_PORTS = 4
 UNUSED_DEST = 31
 GPR_COUNT = 8
 CSR_COUNT = 8
+THREADS_PER_CTA = 16
+PGRAPH_LIMIT = 32
 
 
 class LowerError(Exception):
     """The DFG uses something Mini_Dice cannot run, named so it can be fixed."""
 
 
+def _e_add(left, right):
+    if left == ("int", 0):
+        return right
+    if right == ("int", 0):
+        return left
+    if left[0] == "int" and right[0] == "int":
+        return ("int", left[1] + right[1])
+    return ("add", left, right)
+
+
+def _e_mul(left, right):
+    if left == ("int", 0) or right == ("int", 0):
+        return ("int", 0)
+    if left == ("int", 1):
+        return right
+    if right == ("int", 1):
+        return left
+    if left[0] == "int" and right[0] == "int":
+        return ("int", left[1] * right[1])
+    return ("mul", left, right)
+
+
+def _e_div(expr, width: int):
+    """Divide a byte expression by an access width. Integers must divide exactly."""
+    if expr == ("int", 0):
+        return expr
+    if expr[0] == "int":
+        if expr[1] % width:
+            raise LowerError(
+                f"address offset {expr[1]} bytes is not a multiple of the "
+                f"{width}-byte access")
+        return ("int", expr[1] // width)
+    if expr[0] == "add":
+        return _e_add(_e_div(expr[1], width), _e_div(expr[2], width))
+    if expr[0] == "mul":
+        for factor, other in ((expr[1], expr[2]), (expr[2], expr[1])):
+            if factor[0] == "int" and factor[1] % width == 0:
+                return _e_mul(("int", factor[1] // width), other)
+        for factor, other in ((expr[1], expr[2]), (expr[2], expr[1])):
+            try:
+                return _e_mul(_e_div(factor, width), other)
+            except LowerError:
+                continue
+    raise LowerError(
+        f"address offset is not a multiple of the {width}-byte access")
+
+
+def _split_host(expr) -> tuple:
+    """The part the host bakes into the base, and the constant the fabric adds."""
+    pending = [expr]
+    const = 0
+    varied = ("int", 0)
+    while pending:
+        item = pending.pop()
+        if item == ("int", 0):
+            continue
+        if item[0] == "add":
+            pending.extend((item[1], item[2]))
+        elif item[0] == "int":
+            const += item[1]
+        else:
+            varied = _e_add(varied, item)
+    return varied, const
+
+
 @dataclass
 class Aff:
-    """Byte address as base_pointer + tid * tid + const, before the word scale.
+    """Byte address as base + host(cta, params) + local_tid * tid.
 
-    `base` is the pointer parameter the address derives from. It is never
-    scaled: the CSR holds the word base, and only the tid term and the
-    constant field offset are converted from bytes to words.
+    `host` is what the host adds to one base CSR for this CTA. It may mention
+    the CTA index and kernel parameters. `tid` is the coefficient of the local
+    thread id, which is the only index term the fabric computes. A global
+    thread id is local_tid plus cta * block, so its host term is `cta * block`.
     """
     base: str | None = None
     tid: int = 0
-    const: int = 0
+    host: tuple = ("int", 0)
 
     def __add__(self, other: "Aff") -> "Aff":
         if self.base and other.base:
@@ -76,33 +145,34 @@ class Aff:
                 f"address combines two pointers ({self.base} and {other.base}); "
                 "Mini_Dice addresses must be one base plus an affine function "
                 "of the thread id")
-        return Aff(self.base or other.base,
-                   self.tid + other.tid, self.const + other.const)
+        return Aff(self.base or other.base, self.tid + other.tid,
+                   _e_add(self.host, other.host))
 
     def scaled(self, factor: int) -> "Aff":
         if self.base:
             raise LowerError(
                 f"pointer {self.base} is multiplied in an address; only the "
                 "index may be scaled")
-        return Aff(None, self.tid * factor, self.const * factor)
+        return Aff(None, self.tid * factor, _e_mul(self.host, ("int", factor)))
 
     def to_words(self, width: int) -> "Aff":
-        if self.tid % width or self.const % width:
+        if self.tid % width:
             raise LowerError(
-                f"address offset tid*{self.tid}+{self.const} bytes is not a "
-                f"multiple of the {width}-byte access, so it has no 16-bit "
-                "word address")
-        return Aff(self.base, self.tid // width, self.const // width)
+                f"address stride of {self.tid} bytes is not a multiple of the "
+                f"{width}-byte access")
+        return Aff(self.base, self.tid // width, _e_div(self.host, width))
 
 
 @dataclass
 class MemOp:
     kind: str            # "load" or "store"
-    base: str
-    stride: int          # words added per thread id
-    offset: int          # constant word offset
+    base: str            # pointer parameter the bytes belong to
+    stride: int          # words added per local thread id
+    host: tuple          # words the host adds to this formula's base CSR
+    offset: int          # constant word offset the fabric adds
     name: str            # result name for a load, stored value for a store
     node: int
+    slot: str = ""       # CSR key; a second formula of the same pointer differs
 
 
 @dataclass
@@ -116,7 +186,7 @@ class AluOp:
 @dataclass
 class Lowered:
     ops: list
-    bases: list          # (param name, element stride in words), CSR order
+    bases: list          # (csr slot, pointer, local stride, host term), CSR order
     scalars: list        # scalar kernel params read by the compute, CSR order
     constants: list      # literal values that need a CSR, ascending
     approximations: list
@@ -136,14 +206,58 @@ def _const(token: str) -> int:
     return int(token.split(":", 1)[1], 0)
 
 
+def _fit_launch(grid: int, block: int, approximations: list) -> tuple[int, int]:
+    """The launch the chip can run: CTAs of 16 threads, same lanes as asked.
+
+    A block of 64 covering four rows of a 16-wide tile becomes four CTAs of
+    one row each. The grid grows by the same factor, so lane N is still lane N.
+    """
+    if block == THREADS_PER_CTA:
+        return grid, block
+    if block < THREADS_PER_CTA or block % THREADS_PER_CTA:
+        raise LowerError(
+            f"block {block} does not split into CTAs of {THREADS_PER_CTA}")
+    ctas_per_block = block // THREADS_PER_CTA
+    grid *= ctas_per_block
+    approximations.append(
+        f"launch block {block} split into {ctas_per_block} CTAs of "
+        f"{THREADS_PER_CTA}; grid is {grid}")
+    return grid, THREADS_PER_CTA
+
+
+def _lane_column(node) -> bool:
+    """`thread_id & 15`, the column of a 16-wide tile. It is the local thread."""
+    if not isinstance(node, dict) or node.get("JSON_opt") != "OPT_AND_CONST":
+        return False
+    groups = node["inputs"]
+    if len(groups) != 2 or groups[0][0] != "thread_id":
+        return False
+    return _const(groups[1][0]) == THREADS_PER_CTA - 1
+
+
+def _lane_row(node) -> bool:
+    """`thread_id >> 4`, the row of a 16-wide tile. It is the CTA index."""
+    if not isinstance(node, dict) or node.get("JSON_opt") != "OPT_ASR_CONST":
+        return False
+    groups = node["inputs"]
+    shift = THREADS_PER_CTA.bit_length() - 1
+    if len(groups) != 2 or groups[0][0] != "thread_id":
+        return False
+    return _const(groups[1][0]) == shift
+
+
 def lower(dfg: dict) -> Lowered:
     nodes = {n["id"]: n for n in dfg["nodes"]}
     launch = dfg["meta"]["launch"]
     approximations: list[str] = []
+    grid, block = _fit_launch(launch["grid"], launch["block"], approximations)
 
     dropped = _control_nodes(nodes, approximations)
     real = [n for n in dfg["nodes"] if n["id"] not in dropped]
-    _reject_unsupported(real)
+    # Shifts and masks that only build an address are not ALU ops. The address
+    # walker folds them into a base CSR and a local stride.
+    address_only = _address_only(nodes)
+    _reject_unsupported(real, block, address_only)
 
     produced: dict[int, str] = {}
     ops: list = []
@@ -163,8 +277,14 @@ def lower(dfg: dict) -> Lowered:
                     f"compute reads pointer parameter {node['param_name']} "
                     "directly; pointers are only meaningful as addresses")
             return ("param", node["param_name"])
-        if op == "OPT_EXT":
+        if op in ("OPT_EXT", "OPT_TRUNC"):
+            # A trunc to the 16-bit memory result is the low half the ALU
+            # already produces. Sign-extends are free on the way into that ALU.
             return value_of(node["inputs"][0][0])
+        if block == THREADS_PER_CTA and _lane_column(node):
+            return ("tid",)
+        if block == THREADS_PER_CTA and _lane_row(node):
+            return ("cta",)
         if token not in produced:
             raise LowerError(
                 f"node {token} ({op}) feeds the compute but is not a value "
@@ -173,16 +293,24 @@ def lower(dfg: dict) -> Lowered:
 
     for node in real:
         op = node["JSON_opt"]
-        if str(node["type"]).endswith("*") or op in ("OPT_LD_PARAM", "OPT_EXT"):
+        if node["id"] in address_only:
+            continue
+        if str(node["type"]).endswith("*") or op in (
+                "OPT_LD_PARAM", "OPT_EXT", "OPT_TRUNC"):
+            continue
+        if block == THREADS_PER_CTA and (_lane_column(node) or _lane_row(node)):
             continue
         if op == "OPT_LD":
-            aff = _address(node["inputs"][0][0], nodes).to_words(_width(node))
+            aff = _address(node["inputs"][0][0], nodes, block).to_words(_width(node))
+            host, offset = _split_host(aff.host)
             name = f"v{node['id']}"
             produced[node["id"]] = name
-            ops.append(MemOp("load", aff.base, aff.tid, aff.const, name, node["id"]))
+            ops.append(MemOp("load", aff.base, aff.tid, host, offset,
+                             name, node["id"]))
         elif op == "OPT_STR":
-            aff = _address(node["inputs"][1][0], nodes).to_words(_width(node))
-            ops.append(MemOp("store", aff.base, aff.tid, aff.const,
+            aff = _address(node["inputs"][1][0], nodes, block).to_words(_width(node))
+            host, offset = _split_host(aff.host)
+            ops.append(MemOp("store", aff.base, aff.tid, host, offset,
                              value_of(node["inputs"][0][0])[1], node["id"]))
         elif op == "OPT_SQRT":
             produced[node["id"]] = value_of(node["inputs"][0][0])[1]
@@ -199,8 +327,9 @@ def lower(dfg: dict) -> Lowered:
             approximations.append(
                 f"node {node['id']}: division by {denom[1]} lowered to a "
                 "multiply by its reciprocal, supplied by the host in a CSR")
-        elif op in _ALU or op == "OPT_ADD_CONST":
-            opcode = "add" if op == "OPT_ADD_CONST" else _ALU[op]
+        elif op in _ALU or op in ("OPT_ADD_CONST", "OPT_MUL_CONST"):
+            opcode = {"OPT_ADD_CONST": "add", "OPT_MUL_CONST": "mul"}.get(
+                op, _ALU[op])
             name = f"v{node['id']}"
             produced[node["id"]] = name
             ops.append(AluOp(opcode, [value_of(g[0]) for g in node["inputs"]],
@@ -212,6 +341,22 @@ def lower(dfg: dict) -> Lowered:
         approximations.insert(0,
             "float arithmetic lowered to INT16 on host-quantized inputs; "
             "results wrap modulo 65536")
+    if any(n["JSON_opt"] == "OPT_TRUNC" for n in real):
+        approximations.append(
+            "products wider than 16 bits are kept as their low half, which is "
+            "the INT16 result")
+    if any(n["JSON_opt"] in ("OPT_AND", "OPT_AND_CONST", "OPT_OR", "OPT_ASR",
+                             "OPT_ASR_CONST", "OPT_LLS_CONST", "OPT_SHL")
+           and n["id"] in address_only for n in real):
+        approximations.append(
+            "shifts and masks of the thread id in an address were folded into "
+            "the base CSR and the local stride")
+    if any(_lane_column(n) for n in real):
+        approximations.append(
+            "lane & 15 lowered to the local thread id on regS")
+    if any(_lane_row(n) for n in real):
+        approximations.append(
+            "lane >> 4 lowered to the CTA index, added into the pointer base")
 
     bases, scalars, constants = _operands(ops)
     if len(bases) + len(scalars) + len(constants) > CSR_COUNT:
@@ -220,7 +365,7 @@ def lower(dfg: dict) -> Lowered:
             f"and the fabric broadcasts {CSR_COUNT}")
 
     return Lowered(ops, bases, scalars, constants, approximations,
-                   launch["block"], launch["grid"], dfg["meta"]["kernel"])
+                   block, grid, dfg["meta"]["kernel"])
 
 
 def _width(node: dict) -> int:
@@ -233,40 +378,68 @@ def _width(node: dict) -> int:
     return width
 
 
-def _address(token, nodes: dict) -> Aff:
-    """Evaluate an address expression to base + tid * scale + offset, in bytes."""
+def _address(token, nodes: dict, block: int) -> Aff:
+    """Evaluate an address to base + host(cta, params) + local_tid * tid, in bytes."""
     if token == "thread_id":
-        return Aff(tid=1)
+        # The DFG's thread id is the global lane. The fabric adds the local
+        # part; the host puts this CTA's threads into the pointer base.
+        return Aff(tid=1, host=_e_mul(("cta",), ("int", block)))
     if isinstance(token, str) and token.startswith("const:"):
-        return Aff(const=_const(token))
+        return Aff(host=("int", _const(token)))
     node = nodes[token]
     op = node["JSON_opt"]
     if op == "OPT_LD_PARAM":
         # Kernel pointer arguments are typed "ptr"; derived addresses carry the
-        # pointee type and end in "*".
-        if node["type"] != "ptr" and not str(node["type"]).endswith("*"):
-            raise LowerError(
-                f"parameter {node['param_name']} is used as an address but is "
-                f"a {node['type']}")
-        return Aff(base=node["param_name"])
+        # pointee type and end in "*". A scalar parameter is an index term
+        # the host knows.
+        if node["type"] == "ptr" or str(node["type"]).endswith("*"):
+            return Aff(base=node["param_name"])
+        return Aff(host=("param", node["param_name"]))
     if op == "OPT_EXT":
-        return _address(node["inputs"][0][0], nodes)
+        return _address(node["inputs"][0][0], nodes, block)
+    if block == THREADS_PER_CTA and _lane_column(node):
+        return Aff(tid=1)
+    if block == THREADS_PER_CTA and _lane_row(node):
+        return Aff(host=("cta",))
     if op in ("OPT_ADD", "OPT_ADD_CONST") and str(node["type"]).endswith("*"):
         base_tok, index_tok = _base_and_index(node, nodes)
-        return _address(base_tok, nodes) + _address(index_tok, nodes).scaled(
-            _pointee_bytes(node["type"]))
+        return _address(base_tok, nodes, block) + _address(
+            index_tok, nodes, block).scaled(_pointee_bytes(node["type"]))
+    if op in ("OPT_ADD", "OPT_ADD_CONST"):
+        acc = None
+        for group in node["inputs"]:
+            part = _address(group[0], nodes, block)
+            acc = part if acc is None else acc + part
+        return acc
     if op == "OPT_MUL":
-        left = _address(node["inputs"][0][0], nodes)
-        right = _address(node["inputs"][1][0], nodes)
-        if left.base is None and left.tid == 0:
-            return right.scaled(left.const)
-        if right.base is None and right.tid == 0:
-            return left.scaled(right.const)
+        left = _address(node["inputs"][0][0], nodes, block)
+        right = _address(node["inputs"][1][0], nodes, block)
+
+        def scale_of(aff: Aff):
+            if aff.base is not None or aff.tid:
+                return None
+            return aff.host
+
+        left_scale, right_scale = scale_of(left), scale_of(right)
+        if left_scale is not None and left_scale[0] == "int":
+            return right.scaled(left_scale[1])
+        if right_scale is not None and right_scale[0] == "int":
+            return left.scaled(right_scale[1])
+        if left_scale is not None and right.tid == 0 and right.base is None:
+            return Aff(host=_e_mul(left_scale, right.host))
+        if right_scale is not None and left.tid == 0 and left.base is None:
+            return Aff(host=_e_mul(left.host, right_scale))
         raise LowerError(
-            f"node {node['id']} multiplies two non-constant address terms")
+            f"node {node['id']} multiplies the thread id by a value that is "
+            "not a constant, so the address stride is not fixed")
     if op in ("OPT_LLS_CONST", "OPT_SHL"):
         shift = _const(node["inputs"][1][0])
-        return _address(node["inputs"][0][0], nodes).scaled(1 << shift)
+        return _address(node["inputs"][0][0], nodes, block).scaled(1 << shift)
+    if op in ("OPT_AND", "OPT_AND_CONST", "OPT_OR", "OPT_OR_CONST",
+              "OPT_ASR", "OPT_ASR_CONST", "OPT_LSR_CONST", "OPT_XOR"):
+        # Clang turns (cta << k) + column into a shift, a mask, and an or.
+        # Those are affine in the local thread and the CTA, so they fold.
+        return _fit_index(token, nodes, block)
     raise LowerError(
         f"node {node['id']} ({op}) makes the address data-dependent, which "
         "the word-addressed memory cannot express as one base plus a stride")
@@ -354,13 +527,106 @@ def _users_of(node_id: int, nodes: dict) -> set:
     return users
 
 
-def _reject_unsupported(real: list) -> None:
-    handled = set(_ALU) | {"OPT_ADD_CONST", "OPT_SQRT", "OPT_FDIV", "OPT_LD",
-                           "OPT_STR", "OPT_LD_PARAM", "OPT_EXT", "OPT_MUL",
-                           "OPT_LLS_CONST", "OPT_SHL"}
+def _address_only(nodes: dict) -> set:
+    """Nodes that exist only to compute a load or store address."""
+    in_address = set()
+
+    def walk(token) -> None:
+        if not isinstance(token, int) or token in in_address:
+            return
+        in_address.add(token)
+        for group in nodes[token]["inputs"]:
+            walk(group[0])
+
+    for node in nodes.values():
+        op = node["JSON_opt"]
+        if op == "OPT_LD" and node["inputs"]:
+            walk(node["inputs"][0][0])
+        elif op == "OPT_STR" and len(node["inputs"]) > 1:
+            walk(node["inputs"][1][0])
+
+    value_uses = set()
+    for node in nodes.values():
+        if node["id"] in in_address:
+            continue
+        start = 1 if node["JSON_opt"] == "OPT_STR" else 0
+        # A store's address was walked above; its data input is a real value.
+        # Every other input of a non-address node is a real value too.
+        for group in node["inputs"][start:]:
+            token = group[0]
+            if isinstance(token, int):
+                value_uses.add(token)
+    return in_address - value_uses
+
+
+class _NotAffine(Exception):
+    pass
+
+
+def _eval_bits(token, nodes: dict, block: int, local: int, cta: int) -> int:
+    """Concrete value of an index expression at one local thread and CTA."""
+    if token == "thread_id":
+        return cta * block + local
+    if isinstance(token, str) and token.startswith("const:"):
+        return _const(token)
+    node = nodes[token]
+    op = node["JSON_opt"]
+    args = [_eval_bits(group[0], nodes, block, local, cta)
+            for group in node["inputs"]]
+    if op in ("OPT_EXT", "OPT_TRUNC"):
+        return args[0]
+    if op in ("OPT_ADD", "OPT_ADD_CONST"):
+        return sum(args)
+    if op == "OPT_MUL":
+        return args[0] * args[1]
+    if op in ("OPT_LLS_CONST", "OPT_SHL"):
+        return args[0] << args[1]
+    if op in ("OPT_ASR_CONST", "OPT_LSR_CONST"):
+        return args[0] >> args[1]
+    if op in ("OPT_AND", "OPT_AND_CONST"):
+        return args[0] & args[1]
+    if op in ("OPT_OR", "OPT_OR_CONST"):
+        return args[0] | args[1]
+    if op == "OPT_XOR":
+        return args[0] ^ args[1]
+    raise _NotAffine(op)
+
+
+def _fit_index(token, nodes: dict, block: int) -> Aff:
+    """Fold an index into local_tid * stride + cta * cta_stride + offset.
+
+    The local id only ranges over one CTA, so a shift-and-mask of the global
+    thread id is checked at every local id and a few CTA ids. If it is affine,
+    the host can absorb the CTA term and the fabric adds the local term.
+    """
+    def at(local: int, cta: int) -> int:
+        return _eval_bits(token, nodes, block, local, cta)
+
+    try:
+        origin = at(0, 0)
+        stride = at(1, 0) - origin
+        cta_k = at(0, 1) - origin
+        for cta in range(4):
+            for local in range(block):
+                if at(local, cta) != stride * local + cta_k * cta + origin:
+                    raise _NotAffine("not affine")
+    except _NotAffine as error:
+        raise LowerError(
+            f"node {token} cannot be folded into a base plus a local stride "
+            f"({error})") from None
+    host = _e_add(_e_mul(("cta",), ("int", cta_k)), ("int", origin))
+    return Aff(tid=stride, host=host)
+
+
+def _reject_unsupported(real: list, block: int, address_only: set) -> None:
+    handled = set(_ALU) | {"OPT_ADD_CONST", "OPT_MUL_CONST", "OPT_SQRT", "OPT_FDIV",
+                           "OPT_LD", "OPT_STR", "OPT_LD_PARAM", "OPT_EXT",
+                           "OPT_TRUNC", "OPT_MUL", "OPT_LLS_CONST", "OPT_SHL"}
     for node in real:
         op = node["JSON_opt"]
-        if str(node["type"]).endswith("*"):
+        if node["id"] in address_only or str(node["type"]).endswith("*"):
+            continue
+        if block == THREADS_PER_CTA and (_lane_column(node) or _lane_row(node)):
             continue
         if op not in handled:
             raise LowerError(
@@ -374,11 +640,13 @@ def _operands(ops: list):
     """The CSRs the lowered program reads, in assignment order.
 
     Pointer bases come first so the per-CTA overrides, which rewrite only the
-    bases, stay grouped. A base's stride is the tid coefficient of every
-    access through it, and two accesses to one base at different strides
-    cannot share a single per-CTA base adjustment.
+    bases, stay grouped. Each distinct index formula of a pointer — its local
+    stride together with the term the host adds per CTA — gets its own base
+    CSR. A second formula of the same pointer is named `pointer#1`.
     """
-    strides: dict[str, int] = {}
+    formulas: dict[tuple, str] = {}
+    taken: dict[str, int] = {}
+    bases: list = []
     scalars: list[str] = []
     constants: set[int] = set()
 
@@ -391,19 +659,19 @@ def _operands(ops: list):
             if op.base is None:
                 raise LowerError(
                     f"node {op.node} addresses memory without a pointer base")
-            seen = strides.get(op.base)
-            if seen is not None and seen != op.stride:
-                raise LowerError(
-                    f"pointer {op.base} is indexed at stride {seen} and stride "
-                    f"{op.stride}; one CSR base can absorb only one stride "
-                    "when it is adjusted per CTA")
-            strides[op.base] = op.stride
+            key = (op.base, op.stride, op.host)
+            slot = formulas.get(key)
+            if slot is None:
+                n = taken.get(op.base, 0)
+                slot = op.base if n == 0 else f"{op.base}#{n}"
+                taken[op.base] = n + 1
+                formulas[key] = slot
+                bases.append((slot, op.base, op.stride, op.host))
+            op.slot = slot
             if op.stride not in (0, 1):
                 constants.add(op.stride)
             if op.offset:
                 constants.add(op.offset)
-            if op.kind == "store" and isinstance(op.name, tuple):
-                pass
         if isinstance(op, AluOp):
             for inp in op.inputs:
                 if inp[0] == "param":
@@ -414,7 +682,8 @@ def _operands(ops: list):
                     # The reciprocal is a host-supplied scalar keyed by the
                     # divisor it inverts, carried as its own parameter name.
                     add_scalar(f"recip_{inp[1][1]}")
-    bases = [(name, stride) for name, stride in strides.items()]
+                elif inp[0] == "cta":
+                    add_scalar("cta_id")
     return bases, scalars, sorted(constants)
 
 
@@ -461,8 +730,8 @@ class Program:
 def _assign_csrs(lowered: Lowered) -> dict:
     index = {}
     number = 0
-    for name, _stride in lowered.bases:
-        index[("param", name)] = number
+    for slot, _pointer, _stride, _host in lowered.bases:
+        index[("param", slot)] = number
         number += 1
     for name in lowered.scalars:
         index[("param", name)] = number
@@ -487,16 +756,16 @@ def _addr_ops(op: MemOp) -> tuple[list, tuple]:
     elif op.stride == 1:
         term = ("tid",)
 
-    base = ("param", op.base) if op.base is not None else None
+    base = ("param", op.slot) if op.base is not None else None
     acc = _combine(ops, base, term, f"a{node}b", node)
     if op.offset:
         acc = _combine(ops, acc, ("const", op.offset), f"a{node}", node)
     elif acc is None:
         raise LowerError(f"node {node} address has no base and no index")
     elif not ops or ops[-1].name != _operand_name(acc):
-        # The address is a bare pin. Give it a name by adding zero so every
-        # address the memory graph routes is a value with one producer.
-        acc = _combine(ops, acc, ("const", 0), f"a{node}", node)
+        # The address is already a pin (a base CSR, or the local thread id).
+        # The memory graph routes that pin; adding zero would spend a CSR.
+        return ops, acc
     return ops, acc
 
 
@@ -545,13 +814,14 @@ def _schedule(seq: list) -> list:
     """Group the sequence into compute graphs with one output and memory
     graphs that only route.
 
-    Memory ops that don't depend on each other's results are one frontier.
-    Their addresses are computed first, each into its own register, and then
-    all of them are issued in a single graph so the ports fire together. The
-    next frontier -- the store that consumes the loaded values -- follows.
+    A sum is scheduled as load, multiply, add, then the next term. Issuing
+    every independent load first would hold each term in a register until the
+    end, and eight registers cannot hold a long dot product. Loads that feed
+    a later multiply wait until the multiply already in hand has been added.
     """
     consumers: dict[str, list] = {}
     producer: dict[str, object] = {}
+    order = {id(item): index for index, item in enumerate(seq)}
     for item in seq:
         reads, produced = _seq_vals(item)
         for name in reads:
@@ -560,6 +830,7 @@ def _schedule(seq: list) -> list:
             producer[produced] = item
 
     remaining = list(seq)
+    live = set(id(item) for item in remaining)
     groups: list[list] = []
 
     def output_of(item):
@@ -575,17 +846,24 @@ def _schedule(seq: list) -> list:
         for user in consumers.get(produced, []):
             if id(user) in issue_ids:
                 return True
-            if isinstance(user, AluOp) and user in remaining and \
+            if isinstance(user, AluOp) and id(user) in live and \
                     feeds_issue(user, issue_ids, seen):
                 return True
         return False
+
+    def inputs_ready(item) -> bool:
+        for name in _seq_vals(item)[0]:
+            source = producer.get(name)
+            if source is not None and id(source) in live:
+                return False
+        return True
 
     def is_frontier(issue, seen: set) -> bool:
         """A memory op is in the frontier when none of its inputs is the
         result of a memory op that hasn't been issued yet."""
         for name in _seq_vals(issue)[0]:
             source = producer.get(name)
-            if source is None or source not in remaining:
+            if source is None or id(source) not in live:
                 continue
             if isinstance(source, Issue):
                 return False
@@ -599,33 +877,104 @@ def _schedule(seq: list) -> list:
         seen.add(id(item))
         for name in _seq_vals(item)[0]:
             source = producer.get(name)
-            if source is None or source not in remaining:
+            if source is None or id(source) not in live:
                 continue
             if isinstance(source, Issue) or not is_frontier_value(source, seen):
                 return False
         return True
 
+    def address_only(item, seen: set) -> bool:
+        """An add or mul that only builds a load or store address."""
+        if id(item) in seen:
+            return False
+        seen.add(id(item))
+        users = consumers.get(item.name, [])
+        if not users:
+            return False
+        for user in users:
+            if isinstance(user, Issue):
+                used_as_addr = user.addr[0] == "val" and user.addr[1] == item.name
+                used_as_data = user.kind == "store" and user.data == item.name
+                if not used_as_addr or used_as_data:
+                    return False
+            elif isinstance(user, AluOp):
+                if not address_only(user, seen):
+                    return False
+            else:
+                return False
+        return True
+
+    def first_user(item) -> int:
+        produced = output_of(item)
+        users = consumers.get(produced, []) if produced else []
+        if not users:
+            return order[id(item)]
+        return min(order[id(user)] for user in users)
+
+    def drop(items) -> None:
+        gone = set(id(item) for item in items)
+        live.difference_update(gone)
+        remaining[:] = [item for item in remaining if id(item) not in gone]
+
     while remaining:
-        issues = [item for item in remaining if isinstance(item, Issue)]
-        frontier = [item for item in issues if is_frontier(item, set())]
+        compute = [item for item in remaining
+                   if isinstance(item, AluOp) and inputs_ready(item)
+                   and not address_only(item, set())]
+        if compute:
+            # A Horner chain stays in one p-graph: each product is consumed by
+            # the next add, so only the final value leaves the configuration.
+            # Nine is as long as the chain can be. A pin can be walked through
+            # nine switchbox registers, and the tenth operation is ready one
+            # cycle after that.
+            chain = []
+            chain_ids = set()
+            started = False
+            ready_ids = {id(item) for item in compute}
+            for item in remaining:
+                if isinstance(item, Issue) and started:
+                    break
+                if not isinstance(item, AluOp) or address_only(item, set()):
+                    continue
+                pending = False
+                for name in _seq_vals(item)[0]:
+                    source = producer.get(name)
+                    if source is not None and id(source) in live and id(source) not in chain_ids:
+                        pending = True
+                        break
+                if pending:
+                    if started:
+                        break
+                    continue
+                if not started and id(item) not in ready_ids:
+                    continue
+                started = True
+                chain.append(item)
+                chain_ids.add(id(item))
+                if len(chain) >= 9:
+                    break
+            groups.extend(_single_output_groups(chain, consumers))
+            drop(chain)
+            continue
+
+        frontier = [item for item in remaining
+                    if isinstance(item, Issue) and is_frontier(item, set())]
         if not frontier:
             raise LowerError(
                 "memory operations depend on each other in a cycle, which a "
                 "straight-line p-graph sequence cannot order")
+        frontier.sort(key=first_user)
+        earliest = first_user(frontier[0])
+        wave = [item for item in frontier if first_user(item) == earliest]
+        wave = wave[:MEM_BUDGET]
 
-        # Addresses for the whole frontier, one register each, before any of
-        # the frontier's memory ops is issued.
-        involved = {id(item) for item in frontier}
+        involved = {id(item) for item in wave}
         address_ops = [item for item in remaining if isinstance(item, AluOp)
                        and feeds_issue(item, involved, set())]
         groups.extend(_single_output_groups(address_ops, consumers))
-        for item in address_ops:
-            remaining.remove(item)
-
-        for start in range(0, len(frontier), MEM_BUDGET):
-            groups.append(frontier[start:start + MEM_BUDGET])
-        for item in frontier:
-            remaining.remove(item)
+        drop(address_ops)
+        for start in range(0, len(wave), MEM_BUDGET):
+            groups.append(wave[start:start + MEM_BUDGET])
+        drop(wave)
     return groups
 
 
@@ -648,6 +997,11 @@ def _single_output_groups(ops: list, consumers: dict) -> list:
                 count += 1
         return count
 
+    # A square reused later in the same chain looks like two live values until
+    # that later use is included. The whole chain still has one result.
+    if ops and outside(ops) <= 1:
+        return [ops]
+
     for op in ops:
         if current and outside(current + [op]) > 1:
             groups.append(current)
@@ -661,22 +1015,60 @@ def _single_output_groups(ops: list, consumers: dict) -> list:
 def build(lowered: Lowered) -> Program:
     csr_index = _assign_csrs(lowered)
     groups = _schedule(_sequence(lowered))
+    if len(groups) > PGRAPH_LIMIT:
+        raise LowerError(
+            f"kernel needs {len(groups)} p-graphs and the chip holds "
+            f"{PGRAPH_LIMIT}")
     gpr_of: dict[str, int] = {}
+    # A register is free once the last p-graph that reads its value has run.
+    # Addresses die at the memory graph that consumes them, so a later address
+    # can reuse the register instead of demanding a ninth one.
+    last: dict[str, int] = {}
+    for index, group in enumerate(groups):
+        for item in group:
+            if isinstance(item, AluOp):
+                for inp in item.inputs:
+                    if inp[0] == "val":
+                        last[inp[1]] = index
+                last.setdefault(item.name, index)
+            else:
+                if item.addr[0] == "val":
+                    last[item.addr[1]] = index
+                if item.kind == "store":
+                    last[item.data] = index
+                else:
+                    last.setdefault(item.data, index)
+
+    free: list[int] = []
+    live = 0
+    allocated: dict[str, int] = {}
 
     def assign(name: str) -> int:
-        if name not in gpr_of:
-            if len(gpr_of) >= GPR_COUNT:
+        nonlocal live
+        if name in gpr_of:
+            return gpr_of[name]
+        if free:
+            reg = free.pop()
+        else:
+            if live >= GPR_COUNT:
                 raise LowerError(
                     f"more than {GPR_COUNT} values cross between p-graphs; "
                     "Mini_Dice has eight general registers and no spill slot")
-            gpr_of[name] = len(gpr_of)
-        return gpr_of[name]
+            reg = live
+            live += 1
+        gpr_of[name] = reg
+        allocated[name] = reg
+        return reg
 
     graphs = []
     for index, group in enumerate(groups):
         graphs.append(_emit(index, group, csr_index, gpr_of, assign,
                             index == len(groups) - 1))
-    return Program(lowered, graphs, csr_index, gpr_of)
+        for name, end in last.items():
+            if end == index and name in gpr_of:
+                free.append(gpr_of[name])
+                del gpr_of[name]
+    return Program(lowered, graphs, csr_index, allocated)
 
 
 def _emit(index: int, group: list, csr_index: dict, gpr_of: dict, assign,
@@ -693,6 +1085,8 @@ def _emit(index: int, group: list, csr_index: dict, gpr_of: dict, assign,
         kind = operand[0]
         if kind == "tid":
             return "REGS0"
+        if kind == "cta":
+            return f"CSRX{csr_index[('param', 'cta_id')]}"
         if kind == "param":
             return f"CSRX{csr_index[('param', operand[1])]}"
         if kind == "const":
